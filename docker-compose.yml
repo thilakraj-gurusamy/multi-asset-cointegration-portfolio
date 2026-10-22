@@ -11,6 +11,7 @@ services:
     volumes:
       - ./pgdata:/var/lib/postgresql/data
       - ./db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./db/schema_phase2.sql:/docker-entrypoint-initdb.d/02_schema_phase2.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pipeline_user -d multi_asset_pipeline"]
       interval: 5s

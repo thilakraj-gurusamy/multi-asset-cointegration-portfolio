@@ -73,3 +73,23 @@ equities:
       cadence_minutes: 1440
       provider_timeframe: "1Day"
       gap_tolerance_minutes: 5760
+
+# Phase 2 (cointegration engine, FRD Section 8.2). Deliberately scoped to the "1day" interval
+# only -- the FRD's own rolling-window language ("60-120 trading days") is a daily-resolution
+# concept, and hourly bars would need a much larger lag/window in bar-count terms plus bring in
+# intraday microstructure autocorrelation this phase doesn't address. Same "documented scope
+# narrowing, not an oversight" pattern as the Phase 1 Scope Decision (FRD Section 3).
+cointegration:
+  fx:
+    window_bars: 90     # ~90 trading days, within the FRD's 60-120 day band
+    step_bars: 5         # roll forward ~weekly
+    baskets:
+      # Classic FX triangular no-arbitrage relationship -- log(EURGBP) ~ log(EURUSD) -
+      # log(GBPUSD) in a frictionless market, i.e. textbook cointegration structure, not an
+      # arbitrary 3-asset pick.
+      - ["EUR/USD", "GBP/USD", "EUR/GBP"]
+  equities:
+    window_bars: 90
+    step_bars: 5
+    baskets:
+      - ["JPM", "BAC", "GS", "WFC"]   # financials, sector-matched per FRD 8.1

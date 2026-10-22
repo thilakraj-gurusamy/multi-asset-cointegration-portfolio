@@ -37,6 +37,19 @@ class EquityConfig:
 
 
 @dataclass
+class CointegrationAssetClassConfig:
+    window_bars: int
+    step_bars: int
+    baskets: list[list[str]]
+
+
+@dataclass
+class CointegrationConfig:
+    fx: CointegrationAssetClassConfig
+    equities: CointegrationAssetClassConfig
+
+
+@dataclass
 class Settings:
     database_url: str
     twelvedata_api_key: str
@@ -47,6 +60,7 @@ class Settings:
     log_level: str
     fx: FxConfig
     equities: EquityConfig
+    cointegration: CointegrationConfig
 
 
 def _require_env(name: str) -> str:
@@ -99,6 +113,20 @@ def load_settings(
         intervals=eq_intervals,
     )
 
+    coint_raw = universe["cointegration"]
+    cointegration = CointegrationConfig(
+        fx=CointegrationAssetClassConfig(
+            window_bars=coint_raw["fx"]["window_bars"],
+            step_bars=coint_raw["fx"]["step_bars"],
+            baskets=coint_raw["fx"]["baskets"],
+        ),
+        equities=CointegrationAssetClassConfig(
+            window_bars=coint_raw["equities"]["window_bars"],
+            step_bars=coint_raw["equities"]["step_bars"],
+            baskets=coint_raw["equities"]["baskets"],
+        ),
+    )
+
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if require_api_keys and not database_url:
         raise ConfigError("DATABASE_URL is not set.")
@@ -122,4 +150,5 @@ def load_settings(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         fx=fx,
         equities=equities,
+        cointegration=cointegration,
     )

@@ -81,6 +81,74 @@ class InMemoryRepository(Repository):
         )
 
 
+class FakeCointegrationRepository:
+    """In-memory stand-in for pipeline.cointegration.repository.CointegrationRepository --
+    lets engine orchestration (ADF exclusion, basket skipping, disagreement flagging, window
+    counting) be unit-tested without a live Postgres instance.
+    """
+
+    def __init__(self, asset_ids: dict[tuple[str, str], int], closes: dict[str, dict]):
+        self._asset_ids = asset_ids
+        self._closes = closes  # {symbol: {datetime: float}}
+        self.adf_results = []
+        self.engle_granger_results = []
+        self.johansen_results = []
+        self.method_disagreements = []
+        self._next_result_id = 1
+
+    def get_asset_id(self, symbol, asset_class):
+        return self._asset_ids.get((symbol, asset_class))
+
+    def get_closes(self, asset_id, interval, start, end):
+        for symbol, sym_asset_id in [(s, a) for (s, _), a in self._asset_ids.items()]:
+            if sym_asset_id == asset_id:
+                rows = [(t, c) for t, c in self._closes[symbol].items() if start <= t <= end]
+                return sorted(rows)
+        return []
+
+    def insert_adf_result(self, asset_id, interval, window_start, window_end, result):
+        self.adf_results.append(
+            {"asset_id": asset_id, "window_start": window_start, "window_end": window_end, "result": result}
+        )
+
+    def insert_engle_granger_result(self, asset_class, interval, window_start, window_end, regressand_asset_id, regressor_asset_id, result):
+        result_id = self._next_result_id
+        self._next_result_id += 1
+        self.engle_granger_results.append(
+            {
+                "result_id": result_id, "window_start": window_start, "window_end": window_end,
+                "regressand_asset_id": regressand_asset_id, "regressor_asset_id": regressor_asset_id,
+                "result": result,
+            }
+        )
+        return result_id
+
+    def insert_johansen_result(self, asset_class, interval, window_start, window_end, asset_ids, result):
+        result_id = self._next_result_id
+        self._next_result_id += 1
+        self.johansen_results.append(
+            {
+                "result_id": result_id, "window_start": window_start, "window_end": window_end,
+                "asset_ids": asset_ids, "result": result,
+            }
+        )
+        return result_id
+
+    def insert_method_disagreement(
+        self, asset_class, interval, window_start, window_end, asset_id_a, asset_id_b,
+        engle_granger_result_id, johansen_result_id, eg_significant_5pct, johansen_rank_at_least_1,
+    ):
+        self.method_disagreements.append(
+            {
+                "window_start": window_start, "window_end": window_end,
+                "asset_id_a": asset_id_a, "asset_id_b": asset_id_b,
+                "eg_significant_5pct": eg_significant_5pct,
+                "johansen_rank_at_least_1": johansen_rank_at_least_1,
+                "disagree": eg_significant_5pct != johansen_rank_at_least_1,
+            }
+        )
+
+
 class FakeDataSource(DataSource):
     """Returns pre-programmed bars/exceptions per symbol, in call order."""
 
