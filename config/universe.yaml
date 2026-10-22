@@ -1,0 +1,75 @@
+# Phase 1 universe: FX + equities only. Crypto is explicitly out of scope until Phase 5
+# (FRD Section 8.1 / Scope Decision, Section 3).
+#
+# cadence_minutes for FX "1hour" is pinned to 15 (the upper end of the FRD's 5-15 minute band,
+# Section 8.4), not an arbitrary choice: Twelve Data's free tier is capped at 800 requests/day,
+# and each pipeline cycle spends one request per FX pair. 8 pairs x 96 cycles/day (15-min cadence)
+# = 768 requests/day, which fits under the cap with a small margin. A 10-minute cadence (144
+# cycles/day) would need 1,152 requests/day and blow the free quota. This is documented as a
+# deliberate budget-fit decision -- see README "Known constraints".
+
+fx:
+  source: twelvedata
+  pairs:
+    - symbol: EUR/USD
+    - symbol: GBP/USD
+    - symbol: USD/JPY
+    - symbol: AUD/USD
+    - symbol: USD/CAD
+    - symbol: USD/CHF
+    - symbol: EUR/GBP
+    - symbol: EUR/JPY
+  intervals:
+    "1hour":
+      cadence_minutes: 15
+      provider_interval: "1h"
+      # FX trades ~24/5; the only expected gap is the Fri-close -> Sun-open weekend.
+      # Tolerance is set just under that so a mid-week outage still gets flagged, while the
+      # weekly weekend close does not (documented tradeoff, see pipeline/quality/checks.py).
+      gap_tolerance_minutes: 2800
+    "1day":
+      cadence_minutes: 1440
+      provider_interval: "1day"
+      gap_tolerance_minutes: 5760   # tolerate a long weekend/holiday (~4 days) on daily bars
+  daily_request_budget: 760   # safety margin under Twelve Data's 800/day free cap
+
+equities:
+  source: alpaca_iex
+  feed: iex
+  note: >
+    US large-caps only. Alpaca's free IEX feed is single-venue US equities; it does not cover
+    UK large-caps named in FRD Section 8.1. UK equity coverage would require a paid feed
+    (e.g. Refinitiv/LSEG, EODHD) and is logged here as a known Phase 1 limitation to revisit
+    later (FRD Section 10, cost transparency) rather than silently dropped.
+  universe:
+    - symbol: JPM
+      sector: financials
+    - symbol: BAC
+      sector: financials
+    - symbol: GS
+      sector: financials
+    - symbol: WFC
+      sector: financials
+    - symbol: AAPL
+      sector: technology
+    - symbol: MSFT
+      sector: technology
+    - symbol: XOM
+      sector: energy
+    - symbol: CVX
+      sector: energy
+    - symbol: KO
+      sector: consumer_staples
+    - symbol: PEP
+      sector: consumer_staples
+  intervals:
+    "1hour":
+      cadence_minutes: 60
+      provider_timeframe: "1Hour"
+      # US equities trade ~6.5h/day; overnight + weekend closures are expected and would
+      # otherwise swamp gap detection with false positives (documented tradeoff).
+      gap_tolerance_minutes: 4000
+    "1day":
+      cadence_minutes: 1440
+      provider_timeframe: "1Day"
+      gap_tolerance_minutes: 5760
