@@ -1,4 +1,4 @@
-# Multi-Asset Portfolio — Phase 1 + 2
+# Multi-Asset Portfolio — Phase 1 + 2 + 3
 
 "Modelling a Multi-Asset Portfolio" project (see [`FRD.md`](FRD.md) / [`FRD.docx`](FRD.docx)).
 Built and verified phase by phase, per `FRD_Phases_MasterPrompts.docx`'s Phase 1→5 breakdown.
@@ -7,10 +7,13 @@ Built and verified phase by phase, per `FRD_Phases_MasterPrompts.docx`'s Phase 1
   WebSocket) ingestion, storage, and data-quality logging for FX and equities.
 - **Phase 2 — Cointegration Engine** (FRD Section 8.2): rolling-window ADF, Engle-Granger, and
   Johansen testing on top of the Phase 1 store.
+- **Phase 3 — Relationship-Health Monitoring** (FRD Section 8.5) — **the project's core
+  differentiator**: classifies every monitored pair/basket healthy/warning/halted per window,
+  tracks hedge-ratio drift, logs every status transition, and flags/suspends on breakdown.
 
-Explicitly **not** in these phases (they are Phases 3–5): crypto ingestion, relationship-health
-gating/thresholds, hedge-ratio/half-life drift tracking, signal generation, risk management,
-walk-forward backtesting, paper-trading, and the dashboard.
+Explicitly **not** in these phases (they are Phases 4–5): crypto ingestion, z-score signal
+generation, position sizing, stop-losses, leverage caps, drawdown limits, walk-forward
+backtesting, paper-trading, and the dashboard.
 
 ## Known constraints — read before running
 
@@ -115,6 +118,53 @@ independently re-derived outside this codebase before being accepted; see inline
   matches the literature cited in FRD Section 6–7 (the two methods are known to disagree) and is
   reported, not resolved, per spec.
 
+## Phase 3: running the relationship-health monitor
+
+Consumes Phase 2's already-computed rolling-window output for the given range -- it does not
+re-run Phase 2. Run Phase 2 for the full range first (above), then:
+
+```bash
+python -m pipeline.health.run --asset-class fx --start 2022-01-01 --end 2024-06-01
+python -m pipeline.health.run --asset-class equity --start 2022-01-01 --end 2024-06-01
+```
+
+Each monitored relationship has ONE canonical source for health scoring: **Engle-Granger** for
+pairs (a direct continuous p-value; the alphabetically-forward regressand direction is picked
+deterministically so there's exactly one series per pair, not two competing ones), **Johansen**
+for 3+-asset baskets (via a documented pseudo-p-value proxy interpolated from the trace
+statistic against its 90/95/99% critical values -- `pipeline/health/pseudo_pvalue.py` --
+because Johansen has no native continuous p-value the way EG does). For every window it
+computes hedge-ratio/cointegrating-vector drift against the *previous* window (something
+Phase 2 deliberately does not do), classifies p-value/drift/half-life against the FRD's stated
+initial-default thresholds (`pipeline/health/thresholds.py` -- explicitly defaults to
+recalibrate later, not fixed truths), persists the full computation every window
+(`relationship_health`), logs a row only when the status actually CHANGES
+(`health_status_transitions`), and on any transition to `halted` flags it for position review
+(`position_review_flags`) and fires the alert hook. `HealthRepository.is_suspended(...)` always
+reads the latest window, so a relationship un-suspends automatically once it re-qualifies --
+no separate state machine needed.
+
+**Real findings from running this against the full 2022–2024 FX/equity history** (not
+illustrative -- this is the actual output):
+- Across **6,777** relationship-window observations, only **15 (0.2%)** were ever classified
+  fully `healthy` on all three axes simultaneously; **593 (8.8%)** were `warning`; **6,169
+  (91%)** were `halted`. Most of that is p-value alone (most arbitrary pairs simply aren't
+  cointegrated, correctly), but even among pairs/baskets with genuinely significant EG/Johansen
+  p-values, the half-life axis alone disqualifies most of them from ever reaching `healthy` --
+  concretely validating the FRD's own thesis that statistical significance does not imply a
+  clean, tradeable spread.
+- **EUR/USD vs GBP/USD** never once reached `healthy` across 107 windows (2022-2024) despite
+  being almost always EG-significant (p<0.05) -- its half-life is persistently under 5 days,
+  pinning it to `warning` at best and `halted` whenever the p-value itself briefly drifted
+  above 0.10 (e.g. the window ending 2022-06-13: p=0.151, drift=1.6%, half-life=3.7 days --
+  `overall_status` correctly reads `halted`, driven by the p-value axis alone, confirmed by
+  manual recomputation of the stored drift %).
+- The **EUR/USD-GBP/USD-EUR/GBP triangle** (and the equities **financials basket**,
+  BAC/GS/JPM/WFC) both show genuine, repeated breakdown-and-partial-recovery cycles --
+  `healthy`/`warning` for a run of windows, a transition to `halted` (alert fired, position
+  flagged), then eventual requalification -- exactly the kind of real relationship decay this
+  phase exists to catch, not a static "cointegrated forever" assumption.
+
 ## Tests
 
 ```bash
@@ -130,6 +180,15 @@ ground truth (a constructed cointegrated pair, independent random walks, a 3-ass
 basket), plus engine-orchestration invariants (ADF exclusion actually prevents a symbol from
 entering EG/Johansen that window; a basket only runs when every member passed) against an
 in-memory `FakeCointegrationRepository` — no live DB needed for any of this.
+
+Phase 3 tests cover threshold boundary classification, the pseudo-p-value interpolation
+(including that it reproduces the exact known alpha at each anchor critical value), drift math
+(scalar and vector, including the undefined-zero-baseline case), and monitor orchestration
+against an in-memory `FakeHealthRepository` -- drift is None on a relationship's first window,
+a transition is logged only when status actually changes (not every window), a halted
+transition flags for review and fires the alert hook, suspension lifts automatically once a
+later window re-qualifies, and one relationship's processing failure doesn't stop the others
+(and fires its own `health_check_failed` alert).
 
 ## Verifying Phase 1 (per the Phase 1 review checklist)
 
@@ -178,6 +237,23 @@ in-memory `FakeCointegrationRepository` — no live DB needed for any of this.
   mention "gating" and "halted" only to explain what was deliberately left for Phase 3 —
   that's the one place those words should turn up.)
 
+## Verifying Phase 3 (per the Phase 3 review checklist)
+
+- **All three metrics are persisted per cycle, per relationship, with timestamps:**
+  `SELECT window_end, p_value, hedge_ratio_drift_pct, half_life_days, overall_status FROM relationship_health WHERE relationship_key = 'EUR/USD,GBP/USD' ORDER BY window_end;`
+- **Classification matches the threshold table exactly:** inject synthetic windows via
+  `tests/test_thresholds.py`'s boundary cases, or see the real `EUR/USD,GBP/USD` trace above
+  where a p-value crossing 0.10 alone flips `overall_status` to `halted`.
+- **A halted status actually suspends and flags, not just a label:** confirm via
+  `HealthRepository.is_suspended(...)` (see `test_relationship_stays_suspended_while_latest_window_is_halted`)
+  and `SELECT * FROM position_review_flags;` -- don't just check the status column changed.
+- **Every status change is logged with the inputs that produced it:** `health_status_transitions.reason`
+  is a JSONB snapshot of all three sub-metrics at that exact window; `relationship_health` has
+  the same for every window, not just the ones that changed.
+- **The monitor demonstrably catches real historical breakdowns, not a cosmetic feature:** see
+  the three bullet points above, drawn directly from the 2022-2024 run, not a cherry-picked
+  synthetic example.
+
 ## Repository layout
 
 ```
@@ -186,7 +262,10 @@ config/universe.yaml       FX pairs, equity universe, cadences, provider codes, 
 db/schema.sql                Phase 1: bars, derived stats, runs, quality events
 db/schema_phase2.sql          Phase 2: adf_results, engle_granger_results, johansen_results,
                                 method_disagreements
-docker-compose.yml             Local TimescaleDB instance (mounts both schema files)
+db/schema_phase3.sql           Phase 3: relationship_health, health_status_transitions,
+                                 position_review_flags (+ an additive enrichment of Phase 2's
+                                 johansen_results with the 90%/99% trace critical values)
+docker-compose.yml               Local TimescaleDB instance (mounts all three schema files)
 pipeline/
   config.py                    Loads .env + universe.yaml into typed Settings
   exceptions.py                 FeedDownError / MalformedPayloadError / RateLimitExceededError / ConfigError
@@ -209,5 +288,12 @@ pipeline/
     repository.py                          CointegrationRepository (separate from Phase 1's)
     engine.py                               Rolling-window orchestration
     run.py                                   CLI entrypoint
+  health/
+    thresholds.py                             healthy/warning/halted classification (defaults)
+    pseudo_pvalue.py                            Johansen trace-stat -> proxy p-value
+    drift.py                                     hedge-ratio / cointegrating-vector drift %
+    repository.py                                 HealthRepository (reads Phase 2, writes Phase 3)
+    monitor.py                                     Orchestration: classify, log, transition, alert
+    run.py                                          CLI entrypoint
 tests/                              Unit tests, including in-memory Repository/DataSource fakes
 ```

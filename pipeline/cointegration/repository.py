@@ -115,13 +115,16 @@ class CointegrationRepository:
                 """
                 INSERT INTO johansen_results
                     (asset_class, "interval", window_start, window_end, basket_key, asset_ids,
-                     n_assets, lag_order, deterministic_term, trace_stat_rank0, trace_crit_95_rank0,
+                     n_assets, lag_order, deterministic_term, trace_stat_rank0,
+                     trace_crit_90_rank0, trace_crit_95_rank0, trace_crit_99_rank0,
                      cointegration_rank, cointegrating_vectors, adjustment_speeds, half_life_days_primary)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (asset_class, "interval", window_start, window_end, basket_key)
                 DO UPDATE SET lag_order = EXCLUDED.lag_order, deterministic_term = EXCLUDED.deterministic_term,
                               trace_stat_rank0 = EXCLUDED.trace_stat_rank0,
+                              trace_crit_90_rank0 = EXCLUDED.trace_crit_90_rank0,
                               trace_crit_95_rank0 = EXCLUDED.trace_crit_95_rank0,
+                              trace_crit_99_rank0 = EXCLUDED.trace_crit_99_rank0,
                               cointegration_rank = EXCLUDED.cointegration_rank,
                               cointegrating_vectors = EXCLUDED.cointegrating_vectors,
                               adjustment_speeds = EXCLUDED.adjustment_speeds,
@@ -131,7 +134,8 @@ class CointegrationRepository:
                 (
                     asset_class, interval, window_start, window_end, basket_key, asset_ids,
                     len(asset_ids), result.lag_order, result.deterministic_term,
-                    result.trace_stat_rank0, result.trace_crit_95_rank0, result.cointegration_rank,
+                    result.trace_stat_rank0, result.trace_crit_90_rank0, result.trace_crit_95_rank0,
+                    result.trace_crit_99_rank0, result.cointegration_rank,
                     json.dumps(result.cointegrating_vectors), json.dumps(result.adjustment_speeds),
                     result.half_life_days_primary,
                 ),

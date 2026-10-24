@@ -55,7 +55,9 @@ class JohansenResult:
     lag_order: int
     deterministic_term: str
     trace_stat_rank0: float
+    trace_crit_90_rank0: float
     trace_crit_95_rank0: float
+    trace_crit_99_rank0: float
     cointegration_rank: int
     cointegrating_vectors: list[list[float]]
     adjustment_speeds: list[list[float]]
@@ -109,7 +111,9 @@ def run_johansen(symbols: list[str], data: np.ndarray) -> JohansenResult:
         lag_order=lag_order,
         deterministic_term=VECM_DETERMINISTIC,
         trace_stat_rank0=float(trace_stats[0]),
+        trace_crit_90_rank0=float(johansen_test.cvt[0, 0]),
         trace_crit_95_rank0=float(trace_crit[0]),
+        trace_crit_99_rank0=float(johansen_test.cvt[0, 2]),
         cointegration_rank=rank,
         cointegrating_vectors=cointegrating_vectors,
         adjustment_speeds=adjustment_speeds,

@@ -149,6 +149,53 @@ class FakeCointegrationRepository:
         )
 
 
+class FakeHealthRepository:
+    """In-memory stand-in for pipeline.health.repository.HealthRepository."""
+
+    def __init__(self, pair_windows: dict[str, list[dict]] = None, basket_windows: dict[str, list[dict]] = None):
+        self._pair_windows = pair_windows or {}
+        self._basket_windows = basket_windows or {}
+        self.relationship_health: list[dict] = []
+        self.transitions: list[dict] = []
+        self.review_flags: list[dict] = []
+
+    def get_canonical_pair_windows(self, asset_class, interval, start, end):
+        rows = []
+        for key, windows in self._pair_windows.items():
+            for w in windows:
+                row = dict(w)
+                row["relationship_key"] = key
+                rows.append(row)
+        return rows
+
+    def get_basket_windows(self, asset_class, interval, start, end):
+        rows = []
+        for key, windows in self._basket_windows.items():
+            for w in windows:
+                row = dict(w)
+                row["relationship_key"] = key
+                rows.append(row)
+        return rows
+
+    def insert_relationship_health(self, asset_class, interval, record):
+        self.relationship_health.append(dict(record))
+
+    def insert_transition(self, asset_class, interval, record):
+        self.transitions.append(dict(record))
+
+    def flag_position_for_review(self, asset_class, interval, relationship_key, window_end, reason):
+        self.review_flags.append(
+            {"relationship_key": relationship_key, "window_end": window_end, "reason": reason}
+        )
+
+    def is_suspended(self, asset_class, interval, relationship_key):
+        matching = [r for r in self.relationship_health if r["relationship_key"] == relationship_key]
+        if not matching:
+            return False
+        latest = max(matching, key=lambda r: r["window_end"])
+        return latest["overall_status"] == "halted"
+
+
 class FakeDataSource(DataSource):
     """Returns pre-programmed bars/exceptions per symbol, in call order."""
 
