@@ -1,4 +1,4 @@
-# Multi-Asset Portfolio — Phase 1 + 2 + 3
+# Multi-Asset Portfolio — Phase 1 + 2 + 3 + 4
 
 "Modelling a Multi-Asset Portfolio" project (see [`FRD.md`](FRD.md) / [`FRD.docx`](FRD.docx)).
 Built and verified phase by phase, per `FRD_Phases_MasterPrompts.docx`'s Phase 1→5 breakdown.
@@ -11,9 +11,15 @@ Built and verified phase by phase, per `FRD_Phases_MasterPrompts.docx`'s Phase 1
   differentiator**: classifies every monitored pair/basket healthy/warning/halted per window,
   tracks hedge-ratio drift, logs every status transition, and flags/suspends on breakdown.
 
-Explicitly **not** in these phases (they are Phases 4–5): crypto ingestion, z-score signal
-generation, position sizing, stop-losses, leverage caps, drawdown limits, walk-forward
-backtesting, paper-trading, and the dashboard.
+- **Phase 4 — Signal Generation, Risk Management, Backtest** (FRD Sections 8.6-8.8): z-score
+  entries/exits gated on Phase 3 health, five risk controls (vol-targeting, LTCM-derived
+  leverage caps, relationship-breakdown stop-loss, portfolio drawdown halt, liquidity-aware
+  sizing), and a walk-forward backtest benchmarked against buy-and-hold and a naive
+  no-health-gating baseline.
+
+Explicitly **not** in these phases (they are Phase 5): crypto ingestion, the live/near-real-time
+paper-trading execution loop, and the dashboard/deployment. Phase 4 ends at a validated
+backtest, not a running system.
 
 ## Known constraints — read before running
 
@@ -165,6 +171,68 @@ illustrative -- this is the actual output):
   flagged), then eventual requalification -- exactly the kind of real relationship decay this
   phase exists to catch, not a static "cointegrated forever" assumption.
 
+## Phase 4: running the backtest
+
+Needs Phase 2 + Phase 3 already computed for the requested range -- this phase only consumes
+their output, it never re-runs them.
+
+```bash
+python -m pipeline.backtest.run --asset-class fx --start 2022-01-01 --end 2024-06-01
+python -m pipeline.backtest.run --asset-class equity --start 2022-01-01 --end 2024-06-01
+```
+
+Runs and persists all three variants (`backtest_runs`, `trades`, `signals`,
+`portfolio_equity_curve`): the walk-forward health-gated strategy, a naive static-EG baseline
+with the health gate forced open (fit once on the earliest window, traded for the whole period,
+scoped to pairs only -- EG has no 3+-asset form), and equally-weighted buy-and-hold. All three
+share the identical position/sizing/cost engine (`pipeline/backtest/engine.py`'s
+`simulate_portfolio`) so the Sharpe comparison is apples-to-apples; only the *inputs* (which fit,
+whether the gate is consulted) differ.
+
+Position sizing takes the **minimum** of three independently-computed caps, logged per trade in
+`trades.sizing_detail` so you can see which one actually bound: vol-targeting
+(`target_daily_vol_per_position / in-sample spread std`), the LTCM-derived leverage cap
+(`max_loss_dollars / in-sample worst single-day move` -- deliberately the *worst* observed move,
+not the typical one), and a liquidity cap (real ADV for equities, a fixed-notional proxy for FX
+per the Phase 1 no-volume-data limitation).
+
+**Real findings from running this against the full 2022-2024 history** (not illustrative --
+this is the actual output of `pipeline.backtest.run`):
+
+| Variant | FX Return | FX Sharpe | FX MaxDD | FX Trades | Equity Return | Equity Sharpe | Equity MaxDD | Equity Trades |
+|---|---|---|---|---|---|---|---|---|
+| Walk-forward, health-gated | 0.00% | 0.00 | 0.00% | **0** | -1.58% | -0.41 | **4.04%** | 6 |
+| Naive static EG, no gating | 2.39% | 0.15 | 17.92% | 109 | 33.63% | 0.87 | 16.44% | 262 |
+| Buy-and-hold | 7.02% | 0.84 | 2.63% | -- | 20.28% | 0.54 | 16.28% | -- |
+
+- **The health-gated FX strategy took zero trades over 2.4 years.** This is not a bug --
+  verified directly from the `signals` table: it suppressed 3,413 `halted` and 511 `warning`
+  entry signals that would otherwise have fired, and the single largest `|z|` ever observed
+  during a `healthy` window across the entire FX universe was **1.84**, short of the 2.0 entry
+  threshold. The combination of Phase 3's thresholds and `z_entry=2.0` turned out to be
+  structurally self-defeating for this FX universe: the same conditions that make a
+  relationship "healthy" (stable hedge ratio, sane half-life) are inversely related to the
+  volatility that produces an extreme z-score in the first place. This is exactly why the FRD
+  states these are initial defaults "to be calibrated during backtesting, not fixed truths"
+  (Section 8.5) -- this backtest *is* that calibration signal, not a failure to find one.
+- **The health-halted stop-loss fired for real, independent of P&L.** 3 of the equities
+  strategy's 6 trades closed via `health_halted_stop` rather than a z-score exit -- confirmed
+  directly from `trades`: one (GS,WFC, 2024-02-15 entry) closed **while $8,442 in profit**,
+  proving the stop triggers on relationship breakdown alone, not on losses.
+- **The health-gated strategy traded far less, and drew down far less, than either
+  alternative** on equities (4.04% max drawdown vs. 16.44%/16.28%) -- but also returned less.
+  The naive baseline outright **beat** both the health-gated strategy and buy-and-hold on raw
+  Sharpe in this specific window. This is reported as-is, not spun: a small, honest sample (6
+  trades) from un-calibrated default thresholds is not strong evidence either way on its own,
+  and the FRD's point stands independently of which backtest window happens to favor which
+  side -- the real result here is that the infrastructure correctly measures and reports this
+  nuance instead of asserting a predetermined conclusion.
+- **The portfolio drawdown halt fired for real on the FX naive baseline**, confirmed from
+  `portfolio_equity_curve`: breached 15% on 2023-11-16 (`halted` flips to `true`), and stayed
+  `halted` even as equity recovered over the following days -- new entries stayed blocked for
+  the rest of the run, exactly the "manual review to resume" design (Section 8.7d), not an
+  automatic reset.
+
 ## Tests
 
 ```bash
@@ -189,6 +257,18 @@ a transition is logged only when status actually changes (not every window), a h
 transition flags for review and fires the alert hook, suspension lifts automatically once a
 later window re-qualifies, and one relationship's processing failure doesn't stop the others
 (and fires its own `health_check_failed` alert).
+
+Phase 4 tests cover the pure logic (spread/z-score math, the entry/exit state machine
+exhaustively, vol-targeting, the leverage cap binding tighter than vol-targeting on a
+fat-tailed synthetic series, both liquidity caps, drawdown halt-and-stay-halted, cost
+arithmetic, Sharpe/drawdown metrics including a float-precision edge case) and a full
+walk-forward-discipline test (a window with no usable fit produces a genuine gap, never a
+carried-forward stale fit; in-sample stats provably never see out-of-sample prices) plus an
+engine integration suite against an in-memory `FakeBacktestRepository` -- no entry while
+warning, costs deducted from net P&L, vol-targeting/leverage/liquidity caps each isolated and
+shown to bind when tightest, the health-halted stop closing a position regardless of a
+favorable z-score, a portfolio drawdown breach on ONE relationship blocking a new entry on a
+DIFFERENT relationship the next day, and open positions closed at the end of the backtest.
 
 ## Verifying Phase 1 (per the Phase 1 review checklist)
 
@@ -254,6 +334,16 @@ later window re-qualifies, and one relationship's processing failure doesn't sto
   the three bullet points above, drawn directly from the 2022-2024 run, not a cherry-picked
   synthetic example.
 
+## Verifying Phase 4 (per the Phase 4 review checklist)
+
+- **No new entry while warning/halted:** `SELECT action, count(*) FROM signals WHERE action IN ('suppressed_warning','suppressed_halted') GROUP BY action;` -- non-zero, and `SELECT * FROM trades;` joined back confirms no trade's entry date falls on a suppressed signal.
+- **Position sizing actually varies with inputs, not fixed notional:** `SELECT relationship_key, position_units, sizing_detail FROM trades;` -- `sizing_detail` shows which of the three caps (vol/leverage/liquidity) bound for each trade, and they differ across trades.
+- **Stop-loss triggers independent of P&L:** `SELECT * FROM trades WHERE exit_reason = 'health_halted_stop';` -- see the GS,WFC trade above that closed while $8,442 in profit.
+- **Portfolio drawdown halt actually blocks new entries, not just a label:** `SELECT * FROM portfolio_equity_curve WHERE halted ORDER BY "date" LIMIT 1;` to find the breach date, then confirm no `trades.entry_date` for that asset class falls after it during the same run.
+- **Walk-forward is genuinely rolling:** `SELECT DISTINCT window_start, window_end FROM signals WHERE relationship_key = '<pick one>' ORDER BY window_end;` -- multiple distinct windows, not one fit reused for every signal row (the naive baseline's own signals ARE expected to show just one window -- that's the point of the comparison).
+- **Transaction costs and slippage are in the P&L, not just assumed:** `SELECT gross_pnl, transaction_cost, slippage_cost, net_pnl FROM trades;` and confirm `net_pnl = gross_pnl - transaction_cost - slippage_cost` on real rows.
+- **The Sharpe comparison is the real evidence, not asserted:** the table in the Phase 4 section above is read directly from `backtest_runs`, not hand-picked.
+
 ## Repository layout
 
 ```
@@ -265,7 +355,8 @@ db/schema_phase2.sql          Phase 2: adf_results, engle_granger_results, johan
 db/schema_phase3.sql           Phase 3: relationship_health, health_status_transitions,
                                  position_review_flags (+ an additive enrichment of Phase 2's
                                  johansen_results with the 90%/99% trace critical values)
-docker-compose.yml               Local TimescaleDB instance (mounts all three schema files)
+db/schema_phase4.sql             Phase 4: signals, trades, backtest_runs, portfolio_equity_curve
+docker-compose.yml                 Local TimescaleDB instance (mounts all four schema files)
 pipeline/
   config.py                    Loads .env + universe.yaml into typed Settings
   exceptions.py                 FeedDownError / MalformedPayloadError / RateLimitExceededError / ConfigError
@@ -295,5 +386,22 @@ pipeline/
     repository.py                                 HealthRepository (reads Phase 2, writes Phase 3)
     monitor.py                                     Orchestration: classify, log, transition, alert
     run.py                                          CLI entrypoint
+signals/
+  spread.py                             Spread = weighted dot product of leg prices
+  zscore.py                              Rolling z-score, fit-once-apply-fixed discipline
+  rules.py                               Pure entry/exit state machine (exhaustively tested)
+risk/
+  sizing.py                              Vol-targeted position sizing
+  leverage.py                            LTCM-derived leverage cap (worst-case move, not std)
+  liquidity.py                           Equity ADV cap / FX fixed-notional proxy cap
+  drawdown.py                            Portfolio drawdown tracker; halts, never auto-resumes
+backtest/
+  fitting.py                             Walk-forward fit resolution (pure, no position state)
+  engine.py                              simulate_portfolio() + run_walk_forward_backtest()
+  benchmarks.py                          Naive static-EG baseline + buy-and-hold
+  costs.py                               Transaction cost + slippage, split out separately
+  metrics.py                             Sharpe / total return / max drawdown
+  repository.py                          BacktestRepository (reads Phases 1-3, writes Phase 4)
+  run.py                                 CLI entrypoint; prints the 3-way comparison table
 tests/                              Unit tests, including in-memory Repository/DataSource fakes
 ```

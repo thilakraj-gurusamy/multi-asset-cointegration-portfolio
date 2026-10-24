@@ -50,6 +50,26 @@ class CointegrationConfig:
 
 
 @dataclass
+class LiquidityConfig:
+    equity_adv_fraction: float
+    fx_max_notional_per_position: float
+
+
+@dataclass
+class BacktestConfig:
+    starting_equity: float
+    z_lookback_bars: int
+    z_entry: float
+    z_exit: float
+    transaction_cost_bps: float
+    slippage_bps: float
+    target_daily_vol_per_position: float
+    max_loss_per_position_pct: float
+    portfolio_max_drawdown_pct: float
+    liquidity: LiquidityConfig
+
+
+@dataclass
 class Settings:
     database_url: str
     twelvedata_api_key: str
@@ -61,6 +81,7 @@ class Settings:
     fx: FxConfig
     equities: EquityConfig
     cointegration: CointegrationConfig
+    backtest: BacktestConfig
 
 
 def _require_env(name: str) -> str:
@@ -127,6 +148,23 @@ def load_settings(
         ),
     )
 
+    bt_raw = universe["backtest"]
+    backtest = BacktestConfig(
+        starting_equity=bt_raw["starting_equity"],
+        z_lookback_bars=bt_raw["z_lookback_bars"],
+        z_entry=bt_raw["z_entry"],
+        z_exit=bt_raw["z_exit"],
+        transaction_cost_bps=bt_raw["transaction_cost_bps"],
+        slippage_bps=bt_raw["slippage_bps"],
+        target_daily_vol_per_position=bt_raw["target_daily_vol_per_position"],
+        max_loss_per_position_pct=bt_raw["max_loss_per_position_pct"],
+        portfolio_max_drawdown_pct=bt_raw["portfolio_max_drawdown_pct"],
+        liquidity=LiquidityConfig(
+            equity_adv_fraction=bt_raw["liquidity"]["equity_adv_fraction"],
+            fx_max_notional_per_position=bt_raw["liquidity"]["fx_max_notional_per_position"],
+        ),
+    )
+
     database_url = os.environ.get("DATABASE_URL", "").strip()
     if require_api_keys and not database_url:
         raise ConfigError("DATABASE_URL is not set.")
@@ -151,4 +189,5 @@ def load_settings(
         fx=fx,
         equities=equities,
         cointegration=cointegration,
+        backtest=backtest,
     )

@@ -93,3 +93,31 @@ cointegration:
     step_bars: 5
     baskets:
       - ["JPM", "BAC", "GS", "WFC"]   # financials, sector-matched per FRD 8.1
+
+# Phase 4 (signal generation, risk management, walk-forward backtest; FRD Sections 8.6-8.8).
+# Shared across both asset classes -- the backtest CLI takes --asset-class to pick the universe.
+backtest:
+  starting_equity: 1000000.0
+  z_lookback_bars: 20          # spread z-score normalization window (shorter than the 90-bar
+                                # cointegration window on purpose -- a faster-moving local mean,
+                                # fixed at each walk-forward refit, never updated intra-segment)
+  z_entry: 2.0
+  z_exit: 0.5
+  transaction_cost_bps: 2.0     # per leg notional, charged on both entry and exit
+  slippage_bps: 1.0              # additional haircut, logged as its own line item (Section 9
+                                  # cost transparency) rather than folded silently into the fee
+  target_daily_vol_per_position: 1000.0   # dollars -- vol-targeting sizes to this, using the
+                                            # in-sample spread's day-to-day std
+  max_loss_per_position_pct: 2.0           # % of starting_equity -- the LTCM-derived leverage
+                                            # cap, sized off the in-sample spread's WORST single-
+                                            # day move, not its typical (std) move
+  portfolio_max_drawdown_pct: 15.0          # breach halts new entries for the rest of the run;
+                                             # "manual review to resume" has no meaning inside a
+                                             # single backtest replay, so it simply stays halted
+  liquidity:
+    equity_adv_fraction: 0.01               # equities: cap position at 1% of recent $ ADV
+                                             # (Phase 1 stores real volume for equities)
+    fx_max_notional_per_position: 2000000.0  # FX: Phase 1 has no consolidated FX volume data
+                                              # (documented Phase 1 limitation) -- this fixed
+                                              # notional cap is the liquidity proxy used here in
+                                              # its absence, not a claim of equivalent rigor

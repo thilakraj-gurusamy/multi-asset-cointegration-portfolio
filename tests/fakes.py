@@ -196,6 +196,69 @@ class FakeHealthRepository:
         return latest["overall_status"] == "halted"
 
 
+class FakeBacktestRepository:
+    """In-memory stand-in for pipeline.backtest.repository.BacktestRepository."""
+
+    def __init__(
+        self,
+        pair_windows: dict[str, list[dict]] = None,
+        basket_windows: dict[str, list[dict]] = None,
+        health: dict[str, dict] = None,
+        prices: dict[str, list[dict]] = None,
+    ):
+        self._pair_windows = pair_windows or {}
+        self._basket_windows = basket_windows or {}
+        self._health = health or {}
+        self._prices = prices or {}
+        self.signals: list[dict] = []
+        self.trades: list[dict] = []
+        self.equity_curve: list[dict] = []
+        self.runs: dict[int, dict] = {}
+        self._next_run_id = 1
+
+    def list_pair_relationship_keys(self, asset_class, interval):
+        return list(self._pair_windows.keys())
+
+    def list_basket_relationship_keys(self, asset_class, interval):
+        return list(self._basket_windows.keys())
+
+    def get_pair_windows(self, asset_class, interval, relationship_key, start, end):
+        return [w for w in self._pair_windows.get(relationship_key, []) if start <= w["window_end"] <= end]
+
+    def get_basket_windows(self, asset_class, interval, relationship_key, start, end):
+        return [w for w in self._basket_windows.get(relationship_key, []) if start <= w["window_end"] <= end]
+
+    def get_health_by_window_end(self, asset_class, interval, relationship_key):
+        return dict(self._health.get(relationship_key, {}))
+
+    def get_price_series(self, symbol, asset_class, interval, start, end):
+        return [row for row in self._prices.get(symbol, []) if start <= row["time"] <= end]
+
+    def create_backtest_run(self, asset_class, strategy_variant, start, end, params, starting_equity):
+        run_id = self._next_run_id
+        self._next_run_id += 1
+        self.runs[run_id] = {"asset_class": asset_class, "strategy_variant": strategy_variant}
+        return run_id
+
+    def finalize_backtest_run(self, run_id, final_equity, total_return_pct, sharpe, max_drawdown_pct, num_trades, halted):
+        self.runs[run_id].update(
+            final_equity=final_equity, total_return_pct=total_return_pct, sharpe=sharpe,
+            max_drawdown_pct=max_drawdown_pct, num_trades=num_trades, halted=halted,
+        )
+
+    def insert_signal(self, run_id, asset_class, record):
+        self.signals.append(dict(record))
+
+    def insert_trade(self, run_id, asset_class, record):
+        self.trades.append(dict(record))
+
+    def insert_equity_curve_point(self, run_id, record):
+        self.equity_curve.append(dict(record))
+
+    def close(self):
+        pass
+
+
 class FakeDataSource(DataSource):
     """Returns pre-programmed bars/exceptions per symbol, in call order."""
 
