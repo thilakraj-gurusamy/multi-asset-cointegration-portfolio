@@ -216,6 +216,52 @@ class FakeBacktestRepository:
         self.runs: dict[int, dict] = {}
         self._next_run_id = 1
 
+        # Phase 5: paper trading
+        self._latest_bar_date: dict[str, object] = {}
+        self._open_positions: dict[tuple, dict] = {}
+        self.paper_trades: list[dict] = []
+        self._paper_equity: dict[str, list[dict]] = {}
+        self.cycle_logs: dict[int, dict] = {}
+        self._next_cycle_id = 1
+
+    def set_latest_bar_date(self, asset_class, date):
+        self._latest_bar_date[asset_class] = date
+
+    def get_latest_bar_date(self, asset_class, interval):
+        return self._latest_bar_date.get(asset_class)
+
+    def get_open_position(self, asset_class, relationship_key):
+        row = self._open_positions.get((asset_class, relationship_key))
+        return dict(row) if row else None
+
+    def save_open_position(self, asset_class, relationship_key, position):
+        self._open_positions[(asset_class, relationship_key)] = dict(position)
+
+    def delete_open_position(self, asset_class, relationship_key):
+        self._open_positions.pop((asset_class, relationship_key), None)
+
+    def insert_paper_trade(self, asset_class, record):
+        self.paper_trades.append(dict(record))
+
+    def get_latest_paper_equity(self, asset_class):
+        rows = self._paper_equity.get(asset_class, [])
+        return dict(rows[-1]) if rows else None
+
+    def insert_paper_equity_point(self, asset_class, record):
+        self._paper_equity.setdefault(asset_class, []).append(dict(record))
+
+    def start_cycle_log(self, started_at):
+        cycle_id = self._next_cycle_id
+        self._next_cycle_id += 1
+        self.cycle_logs[cycle_id] = {"started_at": started_at, "status": "running"}
+        return cycle_id
+
+    def finish_cycle_log(self, cycle_id, finished_at, status, steps, error_message, duration_seconds):
+        self.cycle_logs[cycle_id].update(
+            finished_at=finished_at, status=status, steps=steps,
+            error_message=error_message, duration_seconds=duration_seconds,
+        )
+
     def list_pair_relationship_keys(self, asset_class, interval):
         return list(self._pair_windows.keys())
 

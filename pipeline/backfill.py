@@ -5,7 +5,7 @@ import argparse
 from datetime import datetime, timezone
 
 from pipeline.config import load_settings
-from pipeline.factory import build_equity_source, build_fx_source, build_repository
+from pipeline.factory import build_repository, build_source_for_asset_class
 from pipeline.jobs import run_backfill
 from pipeline.logging_setup import configure_logging
 
@@ -16,7 +16,7 @@ def _parse_date(s: str) -> datetime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backfill historical bars for one asset class/interval.")
-    parser.add_argument("--asset-class", choices=["fx", "equity"], required=True)
+    parser.add_argument("--asset-class", choices=["fx", "equity", "crypto"], required=True)
     parser.add_argument("--interval", choices=["1hour", "1day"], required=True)
     parser.add_argument("--start", required=True, help="YYYY-MM-DD, UTC")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD, UTC")
@@ -26,7 +26,7 @@ def main() -> None:
     configure_logging(settings.log_level)
 
     repo = build_repository(settings)
-    data_source = build_fx_source(settings) if args.asset_class == "fx" else build_equity_source(settings)
+    data_source = build_source_for_asset_class(settings, args.asset_class)
     try:
         rows = run_backfill(
             settings, repo, data_source, args.asset_class, args.interval,

@@ -16,7 +16,7 @@ def _parse_date(s: str) -> datetime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the rolling-window cointegration engine (Phase 2).")
-    parser.add_argument("--asset-class", choices=["fx", "equity"], required=True)
+    parser.add_argument("--asset-class", choices=["fx", "equity", "crypto"], required=True)
     parser.add_argument("--start", required=True, help="YYYY-MM-DD, UTC")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD, UTC")
     args = parser.parse_args()
@@ -27,9 +27,15 @@ def main() -> None:
     if args.asset_class == "fx":
         symbols = settings.fx.pairs
         coint_cfg = settings.cointegration.fx
-    else:
+    elif args.asset_class == "equity":
         symbols = [e["symbol"] for e in settings.equities.universe]
         coint_cfg = settings.cointegration.equities
+    else:
+        symbols = settings.crypto.pairs
+        coint_cfg = settings.cointegration.crypto
+
+    if coint_cfg.symbols is not None:
+        symbols = coint_cfg.symbols
 
     repo = CointegrationRepository(settings.database_url)
     try:

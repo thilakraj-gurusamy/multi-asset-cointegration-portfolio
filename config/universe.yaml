@@ -1,5 +1,6 @@
-# Phase 1 universe: FX + equities only. Crypto is explicitly out of scope until Phase 5
-# (FRD Section 8.1 / Scope Decision, Section 3).
+# Phase 1 universe: FX + equities (Phase 1-4). Crypto (Phase 5) is configured separately below
+# -- see the "crypto:" section -- and is explicitly scoped to ingestion + Phase 2/3 instability
+# demonstration only, never Phase 4's production signal/risk pipeline (Section 3 Scope Decision).
 #
 # cadence_minutes for FX "1hour" is pinned to 15 (the upper end of the FRD's 5-15 minute band,
 # Section 8.4), not an arbitrary choice: Twelve Data's free tier is capped at 800 requests/day,
@@ -74,6 +75,53 @@ equities:
       provider_timeframe: "1Day"
       gap_tolerance_minutes: 5760
 
+# Phase 5 crypto module (FRD Section 8.1). Binance public market-data REST API: free, no API
+# key, no signup -- unlike FX/equities, nothing here needs a substitution disclosure. Universe
+# is a top-20-by-24h-quote-volume snapshot taken 2026-10-26, cross-referenced against a list of
+# well-established major cryptocurrencies to exclude stablecoin-vs-stablecoin pairs (e.g.
+# USDC/USDT -- trivially "cointegrated" with USDT by design, not an interesting case) and
+# wrapped/tokenized-equity products that occasionally rank highly by volume on Binance but
+# aren't cryptocurrencies in the relevant sense. Re-run the same ranking query periodically to
+# refresh -- this is a static, human-reviewed list, same convention as the FX/equities universes,
+# not a runtime auto-discovery.
+#
+# Symbols are Binance's own ticker format (e.g. "BTCUSDT", no slash) used directly as the
+# canonical symbol -- the same convention FX (Twelve Data's "EUR/USD") and equities (Alpaca's
+# "AAPL") already follow: canonical symbol == provider ticker, not a separate mapping, so
+# ingest_runner.py needs no crypto-specific code path.
+crypto:
+  source: binance
+  pairs:
+    - symbol: BTCUSDT
+    - symbol: ETHUSDT
+    - symbol: SOLUSDT
+    - symbol: XRPUSDT
+    - symbol: NEARUSDT
+    - symbol: BNBUSDT
+    - symbol: ENAUSDT
+    - symbol: SUIUSDT
+    - symbol: PEPEUSDT
+    - symbol: WLDUSDT
+    - symbol: UNIUSDT
+    - symbol: DOGEUSDT
+    - symbol: TRXUSDT
+    - symbol: QNTUSDT
+    - symbol: LINKUSDT
+    - symbol: ADAUSDT
+    - symbol: AAVEUSDT
+    - symbol: INJUSDT
+    - symbol: LTCUSDT
+    - symbol: AVAXUSDT
+  intervals:
+    "1hour":
+      cadence_minutes: 15     # crypto trades 24/7 -- no weekend budget constraint like FX had
+      provider_interval: "1h"
+      gap_tolerance_minutes: 180    # 3x the 60-min expected spacing; crypto has no weekly close
+    "1day":
+      cadence_minutes: 1440
+      provider_interval: "1d"
+      gap_tolerance_minutes: 2880   # tolerate one missed day without false-positive noise
+
 # Phase 2 (cointegration engine, FRD Section 8.2). Deliberately scoped to the "1day" interval
 # only -- the FRD's own rolling-window language ("60-120 trading days") is a daily-resolution
 # concept, and hourly bars would need a much larger lag/window in bar-count terms plus bring in
@@ -93,6 +141,43 @@ cointegration:
     step_bars: 5
     baskets:
       - ["JPM", "BAC", "GS", "WFC"]   # financials, sector-matched per FRD 8.1
+  crypto:
+    window_bars: 90
+    step_bars: 5
+    # Phase 2's windowing needs every symbol in `symbols` aligned on the SAME shared date grid
+    # (needed for baskets, where all members must line up). ENAUSDT was listed on Binance in
+    # April 2024 -- only ~61 days of history inside this project's 2022-2024 analysis range,
+    # confirmed live: including it collapsed the 20-symbol shared-date intersection from 883
+    # days down to 61, well below window_bars, producing zero windows for the ENTIRE universe.
+    # Excluded here from cointegration testing specifically (not from Phase 1 ingestion, which
+    # still collects it) -- a deliberate, documented scope decision, same pattern as the basket
+    # curation below, not a workaround buried in code.
+    symbols:
+      - BTCUSDT
+      - ETHUSDT
+      - SOLUSDT
+      - XRPUSDT
+      - NEARUSDT
+      - BNBUSDT
+      - SUIUSDT
+      - PEPEUSDT
+      - WLDUSDT
+      - UNIUSDT
+      - DOGEUSDT
+      - TRXUSDT
+      - QNTUSDT
+      - LINKUSDT
+      - ADAUSDT
+      - AAVEUSDT
+      - INJUSDT
+      - LTCUSDT
+      - AVAXUSDT
+    baskets:
+      # The three largest, most liquid assets -- a "crypto-beta" basket, same role as the FX
+      # triangle / equities financials basket: a plausible common-driver grouping, not a random
+      # 3-asset pick. Used ONLY to run Johansen and quantify instability (Section 8.1) -- this
+      # basket, like every crypto relationship, never reaches Phase 4.
+      - ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 # Phase 4 (signal generation, risk management, walk-forward backtest; FRD Sections 8.6-8.8).
 # Shared across both asset classes -- the backtest CLI takes --asset-class to pick the universe.

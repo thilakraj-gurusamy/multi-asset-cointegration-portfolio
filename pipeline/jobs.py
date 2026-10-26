@@ -13,7 +13,7 @@ from pipeline.sources.base import DataSource
 
 logger = get_logger(__name__)
 
-ASSET_CLASSES = ("fx", "equity")
+ASSET_CLASSES = ("fx", "equity", "crypto")
 
 
 def _universe_and_intervals(settings: Settings, asset_class: str):
@@ -23,6 +23,9 @@ def _universe_and_intervals(settings: Settings, asset_class: str):
     elif asset_class == "equity":
         universe_entries = settings.equities.universe
         intervals = settings.equities.intervals
+    elif asset_class == "crypto":
+        universe_entries = [{"symbol": p} for p in settings.crypto.pairs]
+        intervals = settings.crypto.intervals
     else:
         raise ValueError(f"Unknown asset_class {asset_class!r}; expected one of {ASSET_CLASSES}")
     return universe_entries, intervals

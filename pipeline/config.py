@@ -37,16 +37,30 @@ class EquityConfig:
 
 
 @dataclass
+class CryptoConfig:
+    pairs: list[str]  # Binance's own ticker format, e.g. "BTCUSDT" -- used directly as the
+                       # canonical symbol, same convention FX/equities already follow
+    intervals: dict[str, IntervalConfig]
+
+
+@dataclass
 class CointegrationAssetClassConfig:
     window_bars: int
     step_bars: int
     baskets: list[list[str]]
+    symbols: list[str] | None = None  # explicit override of which symbols to cointegration-test;
+                                        # None means "use the full ingestion universe" (FX/equities).
+                                        # Crypto sets this to exclude recently-listed symbols whose
+                                        # short history would collapse the whole universe's shared-
+                                        # date intersection (Phase 2's windowing needs every symbol
+                                        # aligned) well below window_bars -- see universe.yaml.
 
 
 @dataclass
 class CointegrationConfig:
     fx: CointegrationAssetClassConfig
     equities: CointegrationAssetClassConfig
+    crypto: CointegrationAssetClassConfig
 
 
 @dataclass
@@ -80,6 +94,7 @@ class Settings:
     log_level: str
     fx: FxConfig
     equities: EquityConfig
+    crypto: CryptoConfig
     cointegration: CointegrationConfig
     backtest: BacktestConfig
 
@@ -134,6 +149,20 @@ def load_settings(
         intervals=eq_intervals,
     )
 
+    crypto_raw = universe["crypto"]
+    crypto_intervals = {
+        name: IntervalConfig(
+            cadence_minutes=cfg["cadence_minutes"],
+            provider_code=cfg["provider_interval"],
+            gap_tolerance_minutes=cfg["gap_tolerance_minutes"],
+        )
+        for name, cfg in crypto_raw["intervals"].items()
+    }
+    crypto = CryptoConfig(
+        pairs=[p["symbol"] for p in crypto_raw["pairs"]],
+        intervals=crypto_intervals,
+    )
+
     coint_raw = universe["cointegration"]
     cointegration = CointegrationConfig(
         fx=CointegrationAssetClassConfig(
@@ -145,6 +174,12 @@ def load_settings(
             window_bars=coint_raw["equities"]["window_bars"],
             step_bars=coint_raw["equities"]["step_bars"],
             baskets=coint_raw["equities"]["baskets"],
+        ),
+        crypto=CointegrationAssetClassConfig(
+            window_bars=coint_raw["crypto"]["window_bars"],
+            step_bars=coint_raw["crypto"]["step_bars"],
+            baskets=coint_raw["crypto"]["baskets"],
+            symbols=coint_raw["crypto"].get("symbols"),
         ),
     )
 
@@ -188,6 +223,7 @@ def load_settings(
         log_level=os.environ.get("LOG_LEVEL", "INFO"),
         fx=fx,
         equities=equities,
+        crypto=crypto,
         cointegration=cointegration,
         backtest=backtest,
     )

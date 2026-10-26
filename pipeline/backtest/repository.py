@@ -205,3 +205,132 @@ class BacktestRepository:
                 """,
                 (run_id, record["date"], record["equity"], record["daily_pnl"], record["drawdown_pct"], record["halted"]),
             )
+
+    def get_latest_bar_date(self, asset_class: str, interval: str) -> Optional[datetime]:
+        """Latest bar actually available across the whole asset class -- used as "today" for
+        the paper-trading cycle instead of wall-clock date, since a provider's daily candle for
+        the current calendar day may not have published yet (or a market may be closed).
+        """
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT max(b."time") FROM bars b
+                JOIN assets a ON a.asset_id = b.asset_id
+                WHERE a.asset_class = %s AND b."interval" = %s
+                """,
+                (asset_class, interval),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    # ---- Phase 5: paper trading (live, persisted ACROSS cycles -- unlike the backtest's
+    # in-memory-only open_positions dict, which starts flat every run) ----
+
+    def get_open_position(self, asset_class: str, relationship_key: str) -> Optional[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT direction, entry_date, entry_z, entry_spread_value, position_units,
+                       sizing_detail, last_mark_date, last_spread
+                FROM paper_positions WHERE asset_class = %s AND relationship_key = %s
+                """,
+                (asset_class, relationship_key),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            cols = ["direction", "entry_date", "entry_z", "entry_spread_value", "position_units",
+                    "sizing_detail", "last_mark_date", "last_spread"]
+            return dict(zip(cols, row))
+
+    def save_open_position(self, asset_class: str, relationship_key: str, position: dict) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO paper_positions
+                    (asset_class, relationship_key, direction, entry_date, entry_z, entry_spread_value,
+                     position_units, sizing_detail, last_mark_date, last_spread)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (asset_class, relationship_key)
+                DO UPDATE SET last_mark_date = EXCLUDED.last_mark_date, last_spread = EXCLUDED.last_spread
+                """,
+                (
+                    asset_class, relationship_key, position["direction"], position["entry_date"],
+                    position["entry_z"], position["entry_spread_value"], position["position_units"],
+                    json.dumps(position["sizing_detail"]), position["last_mark_date"], position["last_spread"],
+                ),
+            )
+
+    def delete_open_position(self, asset_class: str, relationship_key: str) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM paper_positions WHERE asset_class = %s AND relationship_key = %s",
+                (asset_class, relationship_key),
+            )
+
+    def insert_paper_trade(self, asset_class: str, record: dict) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO paper_trades
+                    (asset_class, relationship_key, direction, entry_date, entry_z, entry_spread_value,
+                     position_units, sizing_detail, exit_date, exit_z, exit_spread_value, exit_reason,
+                     gross_pnl, transaction_cost, slippage_cost, net_pnl)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    asset_class, record["relationship_key"], record["direction"], record["entry_date"],
+                    record["entry_z"], record["entry_spread_value"], record["position_units"],
+                    json.dumps(record["sizing_detail"]), record["exit_date"], record["exit_z"],
+                    record["exit_spread_value"], record["exit_reason"], record["gross_pnl"],
+                    record["transaction_cost"], record["slippage_cost"], record["net_pnl"],
+                ),
+            )
+
+    def get_latest_paper_equity(self, asset_class: str) -> Optional[dict]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT "date", equity, peak_equity, drawdown_pct, halted FROM paper_equity_curve
+                WHERE asset_class = %s ORDER BY "date" DESC LIMIT 1
+                """,
+                (asset_class,),
+            )
+            row = cur.fetchone()
+            return dict(zip(["date", "equity", "peak_equity", "drawdown_pct", "halted"], row)) if row else None
+
+    def insert_paper_equity_point(self, asset_class: str, record: dict) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO paper_equity_curve (asset_class, "date", equity, peak_equity, daily_pnl, drawdown_pct, halted)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (asset_class, "date")
+                DO UPDATE SET equity = EXCLUDED.equity, peak_equity = EXCLUDED.peak_equity,
+                              daily_pnl = EXCLUDED.daily_pnl, drawdown_pct = EXCLUDED.drawdown_pct,
+                              halted = EXCLUDED.halted
+                """,
+                (
+                    asset_class, record["date"], record["equity"], record["peak_equity"],
+                    record["daily_pnl"], record["drawdown_pct"], record["halted"],
+                ),
+            )
+
+    def start_cycle_log(self, started_at: datetime) -> int:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO paper_cycle_log (started_at, status, steps) VALUES (%s, 'running', '{}') RETURNING cycle_id",
+                (started_at,),
+            )
+            return cur.fetchone()[0]
+
+    def finish_cycle_log(self, cycle_id: int, finished_at: datetime, status: str, steps: dict, error_message: Optional[str], duration_seconds: float) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE paper_cycle_log SET finished_at = %s, status = %s, steps = %s,
+                       error_message = %s, duration_seconds = %s
+                WHERE cycle_id = %s
+                """,
+                (finished_at, status, json.dumps(steps), error_message, duration_seconds, cycle_id),
+            )

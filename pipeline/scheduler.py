@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 
 from pipeline.config import Settings, load_settings
-from pipeline.factory import build_equity_source, build_fx_source, build_repository
+from pipeline.factory import build_equity_source, build_fx_source, build_crypto_source, build_repository
 from pipeline.jobs import run_incremental_cycle
 from pipeline.logging_setup import configure_logging, get_logger
 
@@ -35,6 +35,8 @@ def _build_jobs(settings: Settings) -> list[ScheduledJob]:
         jobs.append(ScheduledJob("fx", interval_name, cfg.cadence_minutes))
     for interval_name, cfg in settings.equities.intervals.items():
         jobs.append(ScheduledJob("equity", interval_name, cfg.cadence_minutes))
+    for interval_name, cfg in settings.crypto.intervals.items():
+        jobs.append(ScheduledJob("crypto", interval_name, cfg.cadence_minutes))
     return jobs
 
 
@@ -48,7 +50,11 @@ def run_forever() -> None:
     # client whose daily-request-budget counter (pipeline/util/rate_limiter.py) only protects
     # the free-tier quota if the same instance persists across the day's cycles. Rebuilding a
     # fresh client per cycle would silently reset that counter every time.
-    sources = {"fx": build_fx_source(settings), "equity": build_equity_source(settings)}
+    sources = {
+        "fx": build_fx_source(settings),
+        "equity": build_equity_source(settings),
+        "crypto": build_crypto_source(settings),
+    }
 
     logger.info("Scheduler starting with %s jobs: %s", len(jobs), [(j.asset_class, j.interval_name) for j in jobs])
 

@@ -14,8 +14,44 @@ services:
       - ./db/schema_phase2.sql:/docker-entrypoint-initdb.d/02_schema_phase2.sql:ro
       - ./db/schema_phase3.sql:/docker-entrypoint-initdb.d/03_schema_phase3.sql:ro
       - ./db/schema_phase4.sql:/docker-entrypoint-initdb.d/04_schema_phase4.sql:ro
+      - ./db/schema_phase5.sql:/docker-entrypoint-initdb.d/05_schema_phase5.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pipeline_user -d multi_asset_pipeline"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # The paper-trading execution loop (FRD Section 8.8): ingest -> cointegration -> health ->
+  # paper-signal, on an hourly cycle (pipeline/paper_trading/scheduler.py). Simulated fills
+  # only -- there is no brokerage client dependency anywhere in this image.
+  app:
+    build: .
+    container_name: multi_asset_app
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever DATABASE_URL .env has (that one points at localhost:5433, for
+      # running the code directly on the host during development) -- inside the Compose
+      # network, Postgres is reachable at the SERVICE name "timescaledb" on its container-
+      # internal port 5432, not the host-mapped 5433.
+      DATABASE_URL: postgresql://pipeline_user:pipeline_pass@timescaledb:5432/multi_asset_pipeline
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+    command: ["python", "-m", "pipeline.paper_trading.scheduler"]
+
+  dashboard:
+    build: .
+    container_name: multi_asset_dashboard
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://pipeline_user:pipeline_pass@timescaledb:5432/multi_asset_pipeline
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    ports:
+      - "8501:8501"
+    restart: unless-stopped
+    command: ["streamlit", "run", "dashboard/app.py", "--server.address=0.0.0.0", "--server.port=8501"]

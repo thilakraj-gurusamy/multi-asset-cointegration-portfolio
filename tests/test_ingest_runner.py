@@ -106,6 +106,32 @@ def test_stale_watermark_to_first_new_bar_is_detected_as_gap():
     assert gap_events[0]["details"]["gap_minutes"] > 400 * 24 * 60 - 100
 
 
+def test_duplicate_timestamp_in_one_fetch_is_deduped_and_logged():
+    # Two bars sharing a timestamp (different close values, as if the provider re-reported a
+    # revised/still-forming candle) -- must not reach insert_bars/insert_derived_stats twice
+    # for the same (asset_id, interval, time), which crashes Postgres' ON CONFLICT DO UPDATE.
+    dup_time = _bar(1).time
+    bar_v1 = Bar(time=dup_time, open=1.1, high=1.11, low=1.09, close=1.10, volume=None)
+    bar_v2 = Bar(time=dup_time, open=1.1, high=1.12, low=1.09, close=1.105, volume=None)  # "later" value
+
+    repo = InMemoryRepository()
+    source = FakeDataSource(incremental={"EUR/USD": [_bar(0), bar_v1, bar_v2, _bar(2)]})
+
+    rows = run_ingestion(
+        repo=repo, data_source=source, asset_class="fx", interval_name="1hour", provider_interval="1h",
+        universe_entries=[{"symbol": "EUR/USD"}], run_type="incremental",
+        expected_interval_minutes=60, gap_tolerance_minutes=90,
+    )
+
+    assert rows == 3  # bar(0), one of {bar_v1, bar_v2}, bar(2) -- not 4
+    asset_id = repo.assets[("EUR/USD", "fx")]
+    stored_times = [b.time for b in repo.bars[(asset_id, "1hour")]]
+    assert len(stored_times) == len(set(stored_times))  # no duplicate timestamps landed
+
+    dupe_events = [e for e in repo.quality_events if "duplicate timestamp" in str(e["details"])]
+    assert len(dupe_events) == 1
+
+
 def test_watermark_advances_to_last_bar_time():
     repo = InMemoryRepository()
     source = FakeDataSource(incremental={"EUR/USD": [_bar(0), _bar(1)]})

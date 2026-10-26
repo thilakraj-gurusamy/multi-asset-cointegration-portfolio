@@ -20,7 +20,7 @@ def _parse_date(s: str) -> datetime:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run relationship-health monitoring (Phase 3) over an already-computed Phase 2 range.")
-    parser.add_argument("--asset-class", choices=["fx", "equity"], required=True)
+    parser.add_argument("--asset-class", choices=["fx", "equity", "crypto"], required=True)
     parser.add_argument("--start", required=True, help="YYYY-MM-DD, UTC")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD, UTC")
     args = parser.parse_args()

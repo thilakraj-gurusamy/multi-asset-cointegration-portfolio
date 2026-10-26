@@ -101,6 +101,24 @@ def run_ingestion(
             if not clean_bars:
                 continue
 
+            # Defensive dedup by timestamp (observed once live against Twelve Data's FX feed --
+            # a single fetch_incremental call returned two bars sharing a timestamp, which
+            # crashed derived-stats' batch upsert with Postgres' "ON CONFLICT DO UPDATE command
+            # cannot affect row a second time", since two NEW rows in one statement can't both
+            # resolve against the same conflict target. Root cause not pinned down with
+            # certainty -- it did not reproduce on a follow-up direct check of the same pairs,
+            # consistent with a transient provider-side artifact around the currently-forming
+            # candle -- but guarding against it here is correct regardless of cause. Keeps the
+            # LAST occurrence of a duplicated timestamp (the more recently reported value).
+            deduped_bars = list({bar.time: bar for bar in clean_bars}.values())
+            if len(deduped_bars) < len(clean_bars):
+                had_failure = True
+                repo.log_quality_event(
+                    run_id, asset_id, "malformed_payload", "warning",
+                    {"symbol": symbol, "issue": "duplicate timestamp(s) in one fetch", "before": len(clean_bars), "after": len(deduped_bars)},
+                )
+            clean_bars = deduped_bars
+
             gaps = detect_gaps(clean_bars, expected_interval_minutes, gap_tolerance_minutes, symbol, interval_name)
 
             # detect_gaps only sees gaps WITHIN this cycle's new bars -- it cannot see a gap

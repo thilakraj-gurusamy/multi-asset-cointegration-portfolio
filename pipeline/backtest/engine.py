@@ -51,6 +51,91 @@ class BacktestResult:
     final_equity: float = 0.0
 
 
+@dataclass
+class DayEvaluation:
+    action: str
+    pnl_delta: float
+    updated_position: OpenPosition | None
+    closed_trade: dict | None
+    signal_record: dict
+
+
+def evaluate_relationship_day(
+    key: str,
+    fit: DailyFit,
+    position: OpenPosition | None,
+    asset_class: str,
+    cfg: BacktestConfig,
+    prices_by_symbol: dict,
+    volumes_by_symbol: dict,
+    portfolio_halted: bool,
+    max_loss_dollars: float,
+) -> DayEvaluation:
+    """One relationship, one day: decide the action, mark any open position to market, execute
+    an entry/exit with costs if warranted. Pulled out of simulate_portfolio() specifically so
+    the live paper-trading loop (pipeline/paper_trading/cycle.py) can call the IDENTICAL
+    decision+execution logic one day at a time against DB-persisted position state, instead of
+    duplicating it -- the backtest and the live loop must never be able to silently diverge in
+    what counts as an entry, an exit, or a correctly-sized position.
+    """
+    position_direction = position.direction if position else None
+    action = decide_action(position_direction, fit.z, fit.health_status, cfg.z_entry, cfg.z_exit, portfolio_halted)
+
+    signal_record = {
+        "relationship_key": key, "date": fit.date, "window_start": fit.window_start, "window_end": fit.window_end,
+        "z_score": fit.z, "health_status": fit.health_status, "weights": fit.weights,
+        "z_entry": cfg.z_entry, "z_exit": cfg.z_exit, "action": action,
+    }
+
+    pnl_delta = 0.0
+    updated_position = position
+    closed_trade = None
+
+    if position is not None:
+        direction_sign = 1.0 if position.direction == "long" else -1.0
+        pnl_delta += direction_sign * position.position_units * (fit.spread - position.last_spread)
+        position.last_spread = fit.spread
+
+        if action in (EXIT_Z, EXIT_HEALTH_HALTED):
+            exit_notional = abs(position.position_units * fit.spread)
+            costs = compute_round_trip_leg_cost(exit_notional, cfg.transaction_cost_bps, cfg.slippage_bps)
+            pnl_delta -= costs.total
+            gross_pnl = direction_sign * position.position_units * (fit.spread - position.entry_spread_value)
+            closed_trade = {
+                "relationship_key": key, "direction": position.direction, "entry_date": position.entry_date,
+                "entry_z": position.entry_z, "entry_spread_value": position.entry_spread_value,
+                "position_units": position.position_units, "sizing_detail": position.sizing_detail,
+                "exit_date": fit.date, "exit_z": fit.z, "exit_spread_value": fit.spread,
+                "exit_reason": "z_exit" if action == EXIT_Z else "health_halted_stop",
+                "gross_pnl": gross_pnl, "transaction_cost": costs.transaction_cost,
+                "slippage_cost": costs.slippage_cost, "net_pnl": gross_pnl - costs.total,
+            }
+            updated_position = None
+
+    elif action in (ENTER_LONG, ENTER_SHORT):
+        vol_units = vol_target_units(cfg.target_daily_vol_per_position, fit.spread_change_std)
+        lev_units = leverage_capped_units(max_loss_dollars, fit.spread_worst_case_move)
+        liq_units = _compute_liquidity_cap(asset_class, fit.legs, fit.weights, fit.date, prices_by_symbol, volumes_by_symbol, cfg)
+        units = min(vol_units, lev_units, liq_units)
+        if units > 0 and np.isfinite(units):
+            entry_notional = abs(units * fit.spread)
+            costs = compute_round_trip_leg_cost(entry_notional, cfg.transaction_cost_bps, cfg.slippage_bps)
+            pnl_delta -= costs.total
+            updated_position = OpenPosition(
+                direction="long" if action == ENTER_LONG else "short", entry_date=fit.date, entry_z=fit.z,
+                entry_spread_value=fit.spread, position_units=units,
+                sizing_detail={
+                    "vol_target_units": vol_units, "leverage_cap_units": lev_units, "liquidity_cap_units": liq_units,
+                },
+                last_spread=fit.spread,
+            )
+
+    return DayEvaluation(
+        action=action, pnl_delta=pnl_delta, updated_position=updated_position,
+        closed_trade=closed_trade, signal_record=signal_record,
+    )
+
+
 def _compute_liquidity_cap(
     asset_class: str, legs: list[str], weights: list[float], date, prices_by_symbol: dict, volumes_by_symbol: dict, cfg: BacktestConfig
 ) -> float:
@@ -155,60 +240,19 @@ def simulate_portfolio(
                 continue
 
             position = open_positions.get(key)
-            position_direction = position.direction if position else None
-            action = decide_action(position_direction, fit.z, fit.health_status, cfg.z_entry, cfg.z_exit, drawdown.halted)
-
-            result.signals.append(
-                {
-                    "relationship_key": key, "date": d, "window_start": fit.window_start, "window_end": fit.window_end,
-                    "z_score": fit.z, "health_status": fit.health_status, "weights": fit.weights,
-                    "z_entry": cfg.z_entry, "z_exit": cfg.z_exit, "action": action,
-                }
+            evaluation = evaluate_relationship_day(
+                key, fit, position, asset_class, cfg, prices_cache[key], volumes_cache[key],
+                drawdown.halted, max_loss_dollars,
             )
 
-            if position is not None:
-                direction_sign = 1.0 if position.direction == "long" else -1.0
-                daily_pnl += direction_sign * position.position_units * (fit.spread - position.last_spread)
-                position.last_spread = fit.spread
-
-                if action in (EXIT_Z, EXIT_HEALTH_HALTED):
-                    exit_notional = abs(position.position_units * fit.spread)
-                    costs = compute_round_trip_leg_cost(exit_notional, cfg.transaction_cost_bps, cfg.slippage_bps)
-                    daily_pnl -= costs.total
-                    gross_pnl = direction_sign * position.position_units * (fit.spread - position.entry_spread_value)
-                    result.trades.append(
-                        {
-                            "relationship_key": key, "direction": position.direction, "entry_date": position.entry_date,
-                            "entry_z": position.entry_z, "entry_spread_value": position.entry_spread_value,
-                            "position_units": position.position_units, "sizing_detail": position.sizing_detail,
-                            "exit_date": d, "exit_z": fit.z, "exit_spread_value": fit.spread,
-                            "exit_reason": "z_exit" if action == EXIT_Z else "health_halted_stop",
-                            "gross_pnl": gross_pnl, "transaction_cost": costs.transaction_cost,
-                            "slippage_cost": costs.slippage_cost, "net_pnl": gross_pnl - costs.total,
-                        }
-                    )
-                    del open_positions[key]
-
-            elif action in (ENTER_LONG, ENTER_SHORT):
-                vol_units = vol_target_units(cfg.target_daily_vol_per_position, fit.spread_change_std)
-                lev_units = leverage_capped_units(max_loss_dollars, fit.spread_worst_case_move)
-                liq_units = _compute_liquidity_cap(
-                    asset_class, fit.legs, fit.weights, d, prices_cache[key], volumes_cache[key], cfg
-                )
-                units = min(vol_units, lev_units, liq_units)
-                if units <= 0 or not np.isfinite(units):
-                    continue
-
-                entry_notional = abs(units * fit.spread)
-                costs = compute_round_trip_leg_cost(entry_notional, cfg.transaction_cost_bps, cfg.slippage_bps)
-                daily_pnl -= costs.total
-
-                open_positions[key] = OpenPosition(
-                    direction="long" if action == ENTER_LONG else "short", entry_date=d, entry_z=fit.z,
-                    entry_spread_value=fit.spread, position_units=units,
-                    sizing_detail={"vol_target_units": vol_units, "leverage_cap_units": lev_units, "liquidity_cap_units": liq_units},
-                    last_spread=fit.spread,
-                )
+            result.signals.append(evaluation.signal_record)
+            daily_pnl += evaluation.pnl_delta
+            if evaluation.closed_trade:
+                result.trades.append(evaluation.closed_trade)
+            if evaluation.updated_position is not None:
+                open_positions[key] = evaluation.updated_position
+            elif key in open_positions:
+                del open_positions[key]
 
         drawdown.update(daily_pnl)
         result.equity_curve.append(

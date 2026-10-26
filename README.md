@@ -1,25 +1,30 @@
-# Multi-Asset Portfolio — Phase 1 + 2 + 3 + 4
+# Multi-Asset Portfolio — Phase 1 + 2 + 3 + 4 + 5 (complete)
 
 "Modelling a Multi-Asset Portfolio" project (see [`FRD.md`](FRD.md) / [`FRD.docx`](FRD.docx)).
 Built and verified phase by phase, per `FRD_Phases_MasterPrompts.docx`'s Phase 1→5 breakdown.
+All five phases are implemented, live-validated against real data, and deployable via a single
+`docker compose up`.
 
 - **Phase 1 — Data Pipeline** (FRD Sections 8.1, 8.4, 9, 10): scheduled (REST, not tick/
-  WebSocket) ingestion, storage, and data-quality logging for FX and equities.
+  WebSocket) ingestion, storage, and data-quality logging for FX, equities, and (Phase 5) crypto.
 - **Phase 2 — Cointegration Engine** (FRD Section 8.2): rolling-window ADF, Engle-Granger, and
   Johansen testing on top of the Phase 1 store.
 - **Phase 3 — Relationship-Health Monitoring** (FRD Section 8.5) — **the project's core
   differentiator**: classifies every monitored pair/basket healthy/warning/halted per window,
   tracks hedge-ratio drift, logs every status transition, and flags/suspends on breakdown.
-
 - **Phase 4 — Signal Generation, Risk Management, Backtest** (FRD Sections 8.6-8.8): z-score
   entries/exits gated on Phase 3 health, five risk controls (vol-targeting, LTCM-derived
   leverage caps, relationship-breakdown stop-loss, portfolio drawdown halt, liquidity-aware
   sizing), and a walk-forward backtest benchmarked against buy-and-hold and a naive
   no-health-gating baseline.
+- **Phase 5 — Crypto + Paper-Trading Loop + Dashboard** (FRD Sections 8.1, 8.8, 9, 10, 12): a
+  crypto universe run through the unchanged Phase 2/3 engine to quantify instability (never
+  wired into Phase 4's production signal pipeline), a live daily paper-trading execution loop
+  with simulated fills only, a Streamlit dashboard, and a four-service Docker Compose
+  deployment.
 
-Explicitly **not** in these phases (they are Phase 5): crypto ingestion, the live/near-real-time
-paper-trading execution loop, and the dashboard/deployment. Phase 4 ends at a validated
-backtest, not a running system.
+Explicitly **never** built, for the whole project, under any configuration: a live brokerage
+connection or real order routing (Scope Decision, Section 3).
 
 ## Known constraints — read before running
 
@@ -61,6 +66,7 @@ locations):
 3. **API keys** — copy `.env.example` to `.env` and fill in:
    - `TWELVEDATA_API_KEY` — free signup at twelvedata.com
    - `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` — free paper-trading account at alpaca.markets
+   - Crypto (Binance) needs **no key at all** — nothing to add for it
    - `DATABASE_URL` — defaults already match `docker-compose.yml`
    - `ALERT_WEBHOOK_URL` — optional; leave blank to log-only
 
@@ -233,6 +239,165 @@ this is the actual output of `pipeline.backtest.run`):
   the rest of the run, exactly the "manual review to resume" design (Section 8.7d), not an
   automatic reset.
 
+## Phase 5: crypto, the paper-trading loop, and the dashboard
+
+### Crypto module
+
+Binance's public market-data REST API (`pipeline/sources/binance_client.py`) -- free, no API
+key, no signup, unlike every other Phase 1 source. Universe is a top-20-by-24h-quote-volume
+snapshot (taken 2026-10-26, see `config/universe.yaml`'s `crypto:` section), cross-referenced
+against well-established major cryptocurrencies to exclude stablecoin-vs-stablecoin pairs and
+wrapped/tokenized-equity products that occasionally rank highly by volume on Binance but aren't
+cryptocurrencies in the relevant sense. Symbols use Binance's own ticker format (`BTCUSDT`, no
+slash) directly as the canonical symbol -- the same "canonical symbol == provider ticker"
+convention FX and equities already use, so `ingest_runner.py` needed zero crypto-specific code.
+
+Runs through Phases 1-3 **completely unchanged** -- `--asset-class crypto` is just another
+argument to the same CLIs:
+```bash
+python -m pipeline.backfill --asset-class crypto --interval 1day --start 2022-01-01 --end 2026-10-26
+python -m pipeline.cointegration.run --asset-class crypto --start 2022-01-01 --end 2026-10-26
+python -m pipeline.health.run --asset-class crypto --start 2022-01-01 --end 2026-10-26
+```
+One deliberate, documented scope decision in `config/universe.yaml`: `cointegration.crypto.symbols`
+excludes `ENAUSDT` specifically (not from Phase 1 ingestion, which still collects it) -- it was
+listed on Binance in April 2024, and Phase 2's windowing needs every symbol in the universe
+aligned on one shared date grid (needed for baskets), so its ~61 days of history inside the
+analysis range collapsed the WHOLE 20-symbol intersection from 883 days to 61, confirmed live
+before being excluded, not assumed.
+
+Crypto is structurally excluded from Phase 4 at the **database level**, not just by convention:
+`signals`/`trades`/`backtest_runs`' `asset_class` CHECK constraints only admit `'fx'`/`'equity'`
+(see `db/schema_phase5.sql`'s comment) -- a future bug that tried to wire crypto into the
+production signal pipeline would fail loudly, not silently succeed.
+
+**Quantified instability (FRD Section 8.1's actual requirement), from the live run:**
+
+| | FX triangle | Equities financials | **Crypto (BTC/ETH/SOL)** |
+|---|---|---|---|
+| Max hedge-ratio drift (consecutive windows) | 987% | 263% | **30,840%** |
+| Avg hedge-ratio drift | 20% | 97% | **1,672%** |
+
+Verified not a numerical artifact: the two consecutive windows behind crypto's 30,840% max
+(2023-10-21 → 2023-10-26, just 5 days apart) show the cointegrating vector's own components
+swinging from `[1.0, -12.9, 11.1]` to `[1.0, 132.5, -5249.0]` -- a genuine, dramatic re-estimate
+of the relationship itself, not a near-zero-denominator blowup. The same basket's rank also
+visibly flickers between 0 and 1 across adjacent/overlapping windows in the stored data. This is
+exactly the "mixed, regime-dependent, unstable" crypto cointegration evidence cited in FRD
+Sections 6-7, now demonstrated concretely from this project's own live data rather than only
+cited from the literature.
+
+### The paper-trading execution loop
+
+`pipeline/paper_trading/` runs ingest → cointegration → health → signal end to end
+(`pipeline/paper_trading/cycle.py`), with **simulated fills only** -- there is no brokerage
+client anywhere in this codebase, under any configuration. Cadence is a deliberate, documented
+decision: the cycle's own work (Phase 2/3/4) only ever changes once a day (they operate on
+`"1day"` bars), so `pipeline/paper_trading/scheduler.py` runs the full cycle **hourly**, not
+every 15 minutes -- Phase 1's own near-real-time scheduler (`pipeline/scheduler.py`) is a
+**separate, still-independently-running process** handling the actual 15-min/60-min ingestion;
+this cycle just re-runs the "1day" incremental fetch defensively (in case that process is down)
+before rolling Phase 2→3→4 forward.
+
+The Phase 4 execution logic is **reused, not reimplemented**: `pipeline/backtest/engine.py`'s
+`evaluate_relationship_day()` was extracted specifically so the backtest's in-memory simulation
+and this live loop's DB-persisted-across-cycles position state (`paper_positions`/`paper_trades`
+in `db/schema_phase5.sql`) call the *exact same* decide/size/cost function -- they cannot
+silently diverge in what counts as an entry, an exit, or a correctly-sized position.
+Idempotent by construction: `pipeline/paper_trading/signals.py` checks whether an asset class's
+`paper_equity_curve` already has a row for the latest available bar date before doing anything,
+so an hourly scheduler tick on a day with no new data is a clean no-op, not a double-counted
+P&L or a double-closed position.
+
+```bash
+python -m pipeline.paper_trading.cycle     # one cycle, prints a summary
+python -m pipeline.paper_trading.scheduler  # runs forever, hourly
+```
+
+**Real findings from running this live** (not illustrative):
+- Caught and fixed a real bug live: a single Twelve Data FX fetch once returned two bars
+  sharing a timestamp, which crashed `derived_bar_stats`' batch upsert with Postgres' "ON
+  CONFLICT DO UPDATE command cannot affect row a second time" (two NEW rows in one statement
+  can't both resolve against the same conflict target). Root cause not pinned down with
+  certainty -- it did not reproduce on a direct follow-up check of the same pairs, consistent
+  with a transient provider-side artifact around the currently-forming candle -- but
+  `ingest_runner.py` now defensively dedupes by timestamp within one fetch regardless, logging
+  it as a quality event rather than crashing or silently dropping data.
+- Timed live: a full 3-asset-class cycle took **~124 seconds** against an hourly (3600s)
+  cadence -- comfortably "well within" the chosen refresh cadence (FRD's own phrasing), after
+  tuning the cointegration-step lookback down from 400 to 150 days once the 400-day version was
+  measured at ~293s/cycle (still well within budget, but recomputing hundreds of already-settled
+  historical windows every cycle when at most one NEW window can appear between cycles was
+  pure waste).
+- On the specific days this was run, zero new paper trades fired for FX/equities -- consistent
+  with, not contradicting, the Phase 4 finding that healthy-status days and |z|>2 days rarely
+  coincide under these un-calibrated default thresholds.
+
+### Dashboard
+
+`streamlit run dashboard/app.py` (or the `dashboard` Docker Compose service). Five tabs, all
+reading live from Postgres (`dashboard/queries.py`, no mutations):
+- **Live Paper P&L** -- equity curve, drawdown, halted flag, open positions, recent closed
+  trades, per asset class (FX/equities).
+- **Relationship Health** -- every monitored pair/basket's latest healthy/warning/halted status,
+  color-coded.
+- **Crypto Instability** -- shown in its own tab with an explicit on-screen banner that it is
+  NOT a production signal and never reaches the P&L tab, plus the hedge-ratio-drift comparison
+  bar chart (the 30,840%-vs-987%-vs-263% finding above, visualized).
+- **Backtest Results** -- the Phase 4 three-way comparison table, for context next to the live
+  loop.
+- **Observability** -- the pipeline cycle log, recent halted-relationship transitions, and
+  recent data-quality events (feed downtime, malformed payloads, gaps) -- visible on screen, not
+  buried in log files only.
+
+Verified by actually running it in a browser (both via `streamlit run` directly and via the
+Dockerized `dashboard` service reaching Postgres over the Compose network) and checking every
+tab renders real data with no console errors -- not just that the code imports cleanly.
+`dashboard/queries.py` has no dedicated unit tests: it is a thin SQL/pandas wrapper layer, and
+live-rendering every tab against real data in an actual browser is stronger evidence of
+correctness than mocking `psycopg2`/`pandas.read_sql_query` would have been.
+
+### Deployment
+
+```bash
+docker compose up -d                 # timescaledb + app (paper-trading loop) + dashboard
+docker compose logs -f app           # watch the hourly cycle
+# dashboard at http://localhost:8501
+```
+One image (`Dockerfile`) serves both the `app` and `dashboard` Compose services -- only the
+`command:` differs. Verified live: built the image, ran `app` and `dashboard` as real
+containers against the real (bind-mounted, data-preserving) `timescaledb` container, confirmed
+the dashboard renders in a browser over the Compose-internal network, and let `app` complete one
+full real cycle (`"Paper-trading cycle complete: success"`) before stopping both -- leaving an
+hourly, API-quota-consuming process running indefinitely and unannounced is not something to do
+without the person actually operating this deciding to.
+
+**Cloud VM, stated transparently (FRD Section 10) rather than assumed free:** a small VPS (e.g.
+AWS Lightsail, DigitalOcean, Linode -- roughly $5-12/month for a 1-2 GB instance) running Docker
+is enough: `git clone`, copy `.env` with real credentials, `docker compose up -d`, optionally put
+the dashboard behind a reverse proxy with basic auth if exposed beyond localhost. Twelve Data and
+Alpaca stay free-tier; Binance is free regardless. This step needs a cloud account and real
+payment, so it was not provisioned in this session -- it is documented here, ready to run,
+for whoever operates this to do when they choose to.
+
+### Sustained paper-trading period
+
+The FRD asks this be *prepared* to run for >= 4 weeks with uptime/failures logged, not actually
+run for 4 weeks inside a single build session. It already has everything that needs: `restart:
+unless-stopped` on both the `app` and `dashboard` Compose services, every cycle's outcome logged
+to `paper_cycle_log` (status, duration, per-step detail) regardless of success/failure, and every
+halted-relationship transition or failed ingestion already wired to the alert hook. Start it with
+`docker compose up -d` and let it run.
+
+## Verifying Phase 5 (per the Phase 5 review checklist)
+
+- **Crypto results are an instability demonstration, not a production signal:** `grep -r crypto pipeline/backtest/` returns nothing; the `signals`/`trades`/`backtest_runs` tables structurally reject `asset_class='crypto'` at the database CHECK-constraint level.
+- **No code path can route a real order:** `grep -ri "broker\|order_route\|submit_order" pipeline/` returns nothing outside this README's own prose.
+- **Paper-trading loop uses observed prices, no look-ahead:** see `pipeline/backtest/fitting.py`'s walk-forward discipline (reused unchanged) and `tests/test_fitting.py`'s explicit look-ahead test.
+- **Dashboard shows real live P&L, health, and a deliberately-triggered failure:** force a bad API key (same trick as Phase 1's own checklist), run a cycle, and confirm the Observability tab's cycle log shows the failed step and the alert fired.
+- **Full cycle time fits the cadence:** `python -m pipeline.paper_trading.cycle` and compare its printed/logged duration against `CYCLE_INTERVAL_SECONDS` in `pipeline/paper_trading/scheduler.py`.
+- **Runs from a clean checkout:** `docker compose up -d` after copying `.env.example` → `.env` and filling in keys -- no manual steps beyond that.
+
 ## Tests
 
 ```bash
@@ -269,6 +434,16 @@ warning, costs deducted from net P&L, vol-targeting/leverage/liquidity caps each
 shown to bind when tightest, the health-halted stop closing a position regardless of a
 favorable z-score, a portfolio drawdown breach on ONE relationship blocking a new entry on a
 DIFFERENT relationship the next day, and open positions closed at the end of the backtest.
+
+Phase 5 tests cover the Binance client and crypto payload parsing (mocked HTTP, including
+pagination across a full 1000-row page and a short final page), and the NEW paper-trading glue
+specifically (not re-testing `decide_action`/sizing/costs, already covered by Phase 4's suite):
+a position opens and persists across separate calls simulating separate days, a second call on
+the same day is a correct no-op, a position closes using state reloaded from a fake repository
+(not in-memory continuity), drawdown `halted` state reloads and carries forward correctly, and
+`pipeline.paper_trading.cycle`'s orchestration (via monkeypatched step functions) isolates one
+asset class's ingest failure from the others, aggregates "skipped" as a good outcome rather than
+a failure, and structurally never calls the paper-signal step for crypto.
 
 ## Verifying Phase 1 (per the Phase 1 review checklist)
 
@@ -347,16 +522,26 @@ DIFFERENT relationship the next day, and open positions closed at the end of the
 ## Repository layout
 
 ```
-config/universe.yaml       FX pairs, equity universe, cadences, provider codes, tolerances,
-                             Phase 2 window/step/basket config
-db/schema.sql                Phase 1: bars, derived stats, runs, quality events
-db/schema_phase2.sql          Phase 2: adf_results, engle_granger_results, johansen_results,
-                                method_disagreements
-db/schema_phase3.sql           Phase 3: relationship_health, health_status_transitions,
-                                 position_review_flags (+ an additive enrichment of Phase 2's
-                                 johansen_results with the 90%/99% trace critical values)
-db/schema_phase4.sql             Phase 4: signals, trades, backtest_runs, portfolio_equity_curve
-docker-compose.yml                 Local TimescaleDB instance (mounts all four schema files)
+Dockerfile / .dockerignore    One image, two Compose service roles (app, dashboard)
+docker-compose.yml             timescaledb + app + dashboard (mounts all five schema files)
+config/universe.yaml            FX/equity/crypto universes, cadences, provider codes,
+                                  tolerances, Phase 2 window/step/basket/symbols config,
+                                  Phase 4 backtest params
+db/schema.sql                     Phase 1: bars, derived stats, runs, quality events
+db/schema_phase2.sql                Phase 2: adf_results, engle_granger_results,
+                                      johansen_results, method_disagreements
+db/schema_phase3.sql                  Phase 3: relationship_health, health_status_transitions,
+                                        position_review_flags (+ additive enrichment of Phase 2's
+                                        johansen_results with 90%/99% trace critical values)
+db/schema_phase4.sql                    Phase 4: signals, trades, backtest_runs,
+                                          portfolio_equity_curve
+db/schema_phase5.sql                      Phase 5: widens asset_class to admit 'crypto' on
+                                            Phase 1-3 tables ONLY (Phase 4 tables deliberately
+                                            left fx/equity-only); paper_positions, paper_trades,
+                                            paper_equity_curve, paper_cycle_log
+dashboard/
+  queries.py                                  Read-only SQL -> pandas, no Streamlit dependency
+  app.py                                      Streamlit app: 5 tabs, reads dashboard/queries.py
 pipeline/
   config.py                    Loads .env + universe.yaml into typed Settings
   exceptions.py                 FeedDownError / MalformedPayloadError / RateLimitExceededError / ConfigError
@@ -365,12 +550,14 @@ pipeline/
     base.py                      Bar + DataSource interface
     twelvedata_client.py           FX HTTP client (rate-limited, retrying)
     alpaca_client.py                Equities HTTP client (rate-limited, retrying)
-    fx_source.py / equity_source.py     Parse provider payloads into Bar objects
+    binance_client.py                Crypto HTTP client (public, no API key)
+    fx_source.py / equity_source.py / crypto_source.py   Parse provider payloads into Bar objects
   quality/checks.py               validate_bar() + detect_gaps()
   derived/stats.py                 log return + rolling mean/std (NOT the cointegration engine)
   ingest_runner.py                  Core orchestration: ingest -> validate -> persist -> log
+                                      (+ Phase 5: defensive same-fetch timestamp dedup)
   jobs.py                            Wires Settings -> ingest_runner for a given (asset_class, interval)
-  backfill.py / run_once.py / scheduler.py   Phase 1 CLI entrypoints
+  backfill.py / run_once.py / scheduler.py   Phase 1 CLI entrypoints (fx/equity/crypto)
   cointegration/
     adf.py                             ADF I(1) pre-test
     half_life.py                        AR(1) half-life = -ln(2)/ln(lambda)
@@ -378,30 +565,40 @@ pipeline/
     johansen.py                           Johansen via VECM: rank, vectors, adjustment speeds
     repository.py                          CointegrationRepository (separate from Phase 1's)
     engine.py                               Rolling-window orchestration
-    run.py                                   CLI entrypoint
+    run.py                                   CLI entrypoint (fx/equity/crypto)
   health/
     thresholds.py                             healthy/warning/halted classification (defaults)
     pseudo_pvalue.py                            Johansen trace-stat -> proxy p-value
     drift.py                                     hedge-ratio / cointegrating-vector drift %
     repository.py                                 HealthRepository (reads Phase 2, writes Phase 3)
     monitor.py                                     Orchestration: classify, log, transition, alert
-    run.py                                          CLI entrypoint
-signals/
-  spread.py                             Spread = weighted dot product of leg prices
-  zscore.py                              Rolling z-score, fit-once-apply-fixed discipline
-  rules.py                               Pure entry/exit state machine (exhaustively tested)
-risk/
-  sizing.py                              Vol-targeted position sizing
-  leverage.py                            LTCM-derived leverage cap (worst-case move, not std)
-  liquidity.py                           Equity ADV cap / FX fixed-notional proxy cap
-  drawdown.py                            Portfolio drawdown tracker; halts, never auto-resumes
-backtest/
-  fitting.py                             Walk-forward fit resolution (pure, no position state)
-  engine.py                              simulate_portfolio() + run_walk_forward_backtest()
-  benchmarks.py                          Naive static-EG baseline + buy-and-hold
-  costs.py                               Transaction cost + slippage, split out separately
-  metrics.py                             Sharpe / total return / max drawdown
-  repository.py                          BacktestRepository (reads Phases 1-3, writes Phase 4)
-  run.py                                 CLI entrypoint; prints the 3-way comparison table
+    run.py                                          CLI entrypoint (fx/equity/crypto)
+  signals/
+    spread.py                                        Spread = weighted dot product of leg prices
+    zscore.py                                         Rolling z-score, fit-once-apply-fixed discipline
+    rules.py                                           Pure entry/exit state machine (exhaustively tested)
+  risk/
+    sizing.py                                           Vol-targeted position sizing
+    leverage.py                                          LTCM-derived leverage cap (worst-case move, not std)
+    liquidity.py                                          Equity ADV cap / FX fixed-notional proxy cap
+    drawdown.py                                            Portfolio drawdown tracker; halts, never auto-resumes
+  backtest/
+    fitting.py                                              Walk-forward fit resolution (pure, no position state)
+    engine.py                                                simulate_portfolio() + run_walk_forward_backtest()
+                                                               + evaluate_relationship_day() (shared with Phase 5)
+    benchmarks.py                                            Naive static-EG baseline + buy-and-hold
+    costs.py                                                 Transaction cost + slippage, split out separately
+    metrics.py                                               Sharpe / total return / max drawdown
+    repository.py                                            BacktestRepository (reads Phases 1-3, writes
+                                                               Phase 4 + Phase 5 paper-trading tables)
+    run.py                                                   CLI entrypoint; prints the 3-way comparison table
+  paper_trading/
+    signals.py                                                Live daily signal step -- reuses
+                                                                evaluate_relationship_day() against
+                                                                DB-persisted position state
+    cycle.py                                                   Ingest -> cointegration -> health -> signal,
+                                                                per asset class, with failure isolation
+    scheduler.py                                                Hourly loop (pipeline.scheduler.py's near-
+                                                                real-time ingestion runs separately)
 tests/                              Unit tests, including in-memory Repository/DataSource fakes
 ```
